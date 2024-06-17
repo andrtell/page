@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+
+REGISTRY=${REGISTRY:-registry.tell.nu}
+
+if [[ ! -d .git ]]; then
+    echo "Git?" >&2
+    exit 1
+fi
+
+if [[ ! ( -f Dockerfile || -f Containerfile ) ]]; then
+    echo "Dockerfile?" >&2
+    exit 1
+fi
+
+if ! [[ -d rel/ ]]; then
+    echo "run: mix phx.gen.release"
+    exit 1
+fi
+
+BRANCH=$(git branch --show-current)
+
+if [[ $(git diff --exit-code) && $(git diff --cached --exit-code) ]]; then
+    COMMIT=$(git log -1 --pretty=format:%h)
+else
+    COMMIT="dirty"
+fi
+
+TAG="$BRANCH-$COMMIT"
+
+NAME="$(basename $(pwd))"
+
+IMAGE="$REGISTRY/$NAME:$TAG"
+
+echo -en "Build image: \"${IMAGE}\" ? [Y/n] "
+read -p "" yn
+case $yn in
+    [Nn]* ) exit;;
+esac
+
+if podman build --tag $IMAGE --label "app=$NAME" --label "branch=$BRANCH" --label "commit=$COMMIT" .; then
+    echo "SUCCESS"
+else
+    echo "FAILED"
+fi
