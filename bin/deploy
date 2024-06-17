@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+
+HOST=$1
+
+if [[ -z $HOST ]]; then
+    echo "Host?" >&2
+    exit 1
+fi
+
+NAME=${HOST//./_} # tell.nu -> tell_nu
+
+APP="$(basename $(pwd))"
+
+echo "[ IMAGE ]"
+
+IMAGE=$( \
+    podman image ls -f "label=app=$APP" \
+    | tail -n +2 \
+    | fzf --height='~100%' \
+    | awk -F ' ' '{print $1 ":" $2}' \
+)
+
+if [[ -z "$IMAGE" ]]; then
+    exit 0
+fi
+
+echo
+echo -n "Continue with image [ ${IMAGE} ] and host [ ${HOST} ]"
+read -p " (y/N) " yn
+case $yn in
+    [Yy]*) :;;  
+    *) exit  0;;
+esac
+
+PODMAN_CON=${PODMAN_CON:-tell}
+REG=${REG:-registry.tell.nu}
+
+echo "[ PUSH ]"
+
+if ! podman push $IMAGE; then
+    if ! podman login $REG --get-login > /dev/null; then
+        echo "Logged out of registry '$REG'. Push failed." >&2
+    else
+        echo "Image push failed" >&2
+    fi
+    exit 1
+fi
+
+echo "[ PULL ]"
+
+if ! podman -r -c $PODMAN_CON pull $IMAGE; then
+    if ! podman -r -c $PODMAN_CON login $REG --get-login > /dev/null; then
+        echo "Logged out of registry '$REG' on remote. Pull failed." >&2
+    else
+        echo "Image pull on remote failed" >&2
+    fi
+    exit 1
+fi
+
+echo "[ NETWORK ]"
+
+NET="${NAME}_net"
+
+podman -r -c $PODMAN_CON network create $NET --ignore
+
+echo "[ POSTGRES ]"
+
+PG_CON="${NAME}_pg"
+PG_VOL="${NAME}_vol"
+PG_PWD=$(mktemp -u XXXXXXXXXX)
+
+podman -r -c $PODMAN_CON volume create $PG_VOL --ignore
+
+podman -r -c $PODMAN_CON run \
+    -d \
+    --replace \
+    --name $PG_CON \
+    --volume="$PG_VOL:/var/lib/postgresql/data" \
+    --network=$NET \
+    --env="POSTGRES_PASSWORD=$PG_PWD" \
+    docker.io/postgres
+
+echo "[ DATABASE ]"
+
+DB_NAME=$NAME
+DB_USER=$NAME
+DB_PASS="ABC"
+
+TMP=$(mktemp)
+
+cat > $TMP <<-EOF
+SELECT 'CREATE DATABASE $DB_NAME' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$DB_NAME')\gexec
+\c $DB_NAME
+DO
+\$\$
+    BEGIN
+        IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = '$DB_USER') THEN
+            CREATE USER "$DB_USER" WITH ENCRYPTED PASSWORD '$DB_PASS';
+            GRANT pg_read_all_data TO "$DB_USER";
+            GRANT pg_write_all_data TO "$DB_USER";
+            GRANT CREATE ON DATABASE "$DB_NAME" TO "$DB_USER";
+            GRANT CREATE ON SCHEMA public TO "$DB_USER";
+        ELSE
+            ALTER USER "$DB_USER" WITH ENCRYPTED PASSWORD '$DB_PASS';
+        END IF;
+    END
+\$\$;
+EOF
+
+podman -r exec -i $PG_CON psql -U postgres < $TMP
+
+rm $TMP
+
+SECRET_KEY_BASE=$(mix phx.gen.secret)
+
+echo "[ MIGRATE ]"
+
+podman -r -c $PODMAN_CON run \
+    --name "${NAME}_migrate" \
+    --rm \
+    --network=$NET \
+    --env="SECRET_KEY_BASE=$SECRET_KEY_BASE" \
+    --env="DATABASE_URL=ecto://$DB_USER:$DB_PASS@$PG_CON/$DB_NAME" \
+    "$IMAGE" /app/bin/migrate
+
+echo "[ DEPLOY ]"
+
+podman -r -c $PODMAN_CON run \
+    -d \
+    --name=$NAME \
+    --restart=always \
+    --replace \
+    --network='traefik' \
+    --network=$NET \
+    --env="PHX_HOST=$HOST" \
+    --env="DATABASE_URL=ecto://$DB_USER:$DB_PASS@$PG_CON/$DB_NAME" \
+    --env="SECRET_KEY_BASE=$SECRET_KEY_BASE" \
+    --label='traefik.enable=true' \
+    --label="traefik.http.routers.$NAME.entrypoints=websecure" \
+    --label="traefik.http.routers.$NAME.rule=Host(\`$HOST\`)" \
+    --label="traefik.http.routers.$NAME.tls=true" \
+    --label='traefik.http.routers.$NAME.tls.certresolver=letsencrypt' \
+    --label="app=$APP" \
+    "$IMAGE"
+
+echo "[ LOGS ]"
+
+podman -r logs -f $NAME
