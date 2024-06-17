@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+if podman container exists postgres
+then
+    podman exec -it postgres psql -U postgres $@
+else
+    echo 'Run: postgres-start'
+fi
