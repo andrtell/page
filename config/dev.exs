@@ -25,8 +25,7 @@ config :page, PageWeb.Endpoint,
   debug_errors: true,
   secret_key_base: "lSKRhJw7yjJdPnIc4ExRCpm2Wuq73ufn6QCf+GmmZFD3qQnq4FKcz/soMiFEyzSk",
   watchers: [
-    esbuild: {Esbuild, :install_and_run, [:page, ~w(--sourcemap=inline --watch)]},
-    tailwind: {Tailwind, :install_and_run, [:page, ~w(--watch)]}
+    esbuild: {Esbuild, :install_and_run, [:page, ~w(--sourcemap=inline --watch)]}
   ]
 
 # ## SSL Support
